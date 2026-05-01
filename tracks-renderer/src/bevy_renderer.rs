@@ -1,9 +1,6 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, mpsc::Receiver};
-use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex, mpsc::Receiver};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum InputCommand {
@@ -39,7 +36,14 @@ pub fn start_bevy(rx: Receiver<InputCommand>) {
         .insert_resource(shared_rx)
         .insert_resource(MouseState::default())
         .add_systems(Startup, setup)
-        .add_systems(Update, (process_input_system, update_camera_transform_system, animate_cube_system))
+        .add_systems(
+            Update,
+            (
+                process_input_system,
+                update_camera_transform_system,
+                animate_cube_system,
+            ),
+        )
         .run();
 }
 
@@ -49,14 +53,20 @@ pub fn start_bevy(rx: Receiver<InputCommand>) {
 pub async fn start_bevy_wasm(_canvas_id: &str) {
     console_error_panic_hook::set_once();
     use bevy::prelude::*;
-    use bevy_webgl2::WebGL2Plugin;
 
     // Build and run the Bevy app for web.
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugin(WebGL2Plugin)
-        .add_startup_system(setup)
-        .add_systems(Update, (process_input_system, update_camera_transform_system, animate_cube_system))
+        // .add_plugins(WebGL2Plugin)
+        .add_systems(Startup, setup)
+        .add_systems(
+            Update,
+            (
+                process_input_system,
+                update_camera_transform_system,
+                animate_cube_system,
+            ),
+        )
         .run();
 }
 
@@ -160,25 +170,7 @@ fn update_camera_transform_system(mut query: Query<(&mut Transform, &OrbitCamera
 
 fn animate_cube_system(time: Res<Time>, mut query: Query<&mut Transform, With<Rotating>>) {
     for mut transform in query.iter_mut() {
-        transform.rotation = Quat::from_rotation_y(time.elapsed_seconds() * 0.8)
-            * Quat::from_rotation_x(time.elapsed_seconds() * 0.4);
-    }
-}
-        
-
-fn update_camera_transform_system(mut query: Query<(&mut Transform, &OrbitCamera), With<Camera>>) {
-    for (mut transform, orbit) in query.iter_mut() {
-        let x = orbit.distance * orbit.pitch.cos() * orbit.yaw.sin();
-        let y = orbit.distance * orbit.pitch.sin();
-        let z = orbit.distance * orbit.pitch.cos() * orbit.yaw.cos();
-        let pos = Vec3::new(x, y, z) + orbit.target;
-        *transform = Transform::from_translation(pos).looking_at(orbit.target, Vec3::Y);
-    }
-}
-
-fn animate_cube_system(time: Res<Time>, mut query: Query<&mut Transform, With<Rotating>>) {
-    for mut transform in query.iter_mut() {
-        transform.rotation = Quat::from_rotation_y(time.elapsed_seconds() * 0.8)
-            * Quat::from_rotation_x(time.elapsed_seconds() * 0.4);
+        transform.rotation = Quat::from_rotation_y(time.elapsed_secs() * 0.8)
+            * Quat::from_rotation_x(time.elapsed_secs() * 0.4);
     }
 }

@@ -3,3 +3,4 @@ members = [
     "src-tauri",
     "tracks-renderer",
 ]
+resolver = "3"
