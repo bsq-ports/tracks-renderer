@@ -7,12 +7,14 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-bevy = "0.18.1"
+bevy = {version = "0.18.1", features = ["3d", "webgl2", "std"], default-features = false }
 wasm-bindgen = { version = "0.2", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["Window", "console"] }
 serde = {version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [features]
-wasm = ["wasm-bindgen", "console_error_panic_hook"]
-default = ["wasm"]
+wasm = ["wasm-bindgen", "console_error_panic_hook", "wasm-bindgen-futures", "web-sys"]
+default = []

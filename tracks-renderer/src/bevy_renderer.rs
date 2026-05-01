@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::prelude::shape;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, mpsc::Receiver};
 
@@ -28,12 +29,15 @@ struct MouseState {
     right: bool,
 }
 
+#[derive(Resource)]
+struct SharedReceiver(Arc<Mutex<Receiver<InputCommand>>>);
+
 pub fn start_bevy(rx: Receiver<InputCommand>) {
     let shared_rx = Arc::new(Mutex::new(rx));
 
     App::new()
         .add_plugins(DefaultPlugins)
-        .insert_resource(shared_rx)
+        .insert_resource(SharedReceiver(shared_rx))
         .insert_resource(MouseState::default())
         .add_systems(Startup, setup)
         .add_systems(
@@ -79,7 +83,7 @@ fn setup(
     commands.spawn(PbrBundle {
         mesh: meshes.add(Mesh::from(shape::Plane { size: 50.0 })),
         material: materials.add(StandardMaterial {
-            base_color: Color::rgb(0.12, 0.12, 0.12),
+            base_color: Color::srgb(0.12, 0.12, 0.12),
             ..default()
         }),
         ..default()
@@ -90,7 +94,7 @@ fn setup(
         PbrBundle {
             mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
             material: materials.add(StandardMaterial {
-                base_color: Color::rgb(0.8, 0.2, 0.2),
+                base_color: Color::srgb(0.8, 0.2, 0.2),
                 ..default()
             }),
             transform: Transform::from_xyz(0.0, 0.5, 0.0),
@@ -121,11 +125,11 @@ fn setup(
 }
 
 fn process_input_system(
-    rx: Res<Arc<Mutex<Receiver<InputCommand>>>>,
+    rx: Res<SharedReceiver>,
     mut mouse: ResMut<MouseState>,
-    mut cam_query: Query<(&mut Transform, &mut OrbitCamera), With<Camera>>,
+    mut cam_query: Query<(&mut Transform, &mut OrbitCamera), With<Camera3d>>,
 ) {
-    while let Ok(cmd) = rx.lock().unwrap().try_recv() {
+    while let Ok(cmd) = rx.0.lock().unwrap().try_recv() {
         match cmd {
             InputCommand::Key { .. } => {
                 // reserved for future use
@@ -158,7 +162,7 @@ fn process_input_system(
     }
 }
 
-fn update_camera_transform_system(mut query: Query<(&mut Transform, &OrbitCamera), With<Camera>>) {
+fn update_camera_transform_system(mut query: Query<(&mut Transform, &OrbitCamera), With<Camera3d>>) {
     for (mut transform, orbit) in query.iter_mut() {
         let x = orbit.distance * orbit.pitch.cos() * orbit.yaw.sin();
         let y = orbit.distance * orbit.pitch.sin();
