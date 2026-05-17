@@ -1,8 +1,41 @@
 use bevy::{
-    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
-    prelude::*,
+    ecs::event::Trigger, input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll}, prelude::*
 };
-// Note: We no longer need serde or std::sync channels for input!
+use std::{str::FromStr, sync::Mutex};
+
+pub use tracks_rs::prelude::*;
+use tracks_rs::{
+    animation::coroutine_manager::CoroutineManager,
+    point_definition::{
+        Vector4PointDefinition, quaternion_point_definition::QuaternionPointDefinition,
+        vector3_point_definition::Vector3PointDefinition,
+    },
+};
+
+#[cfg(feature = "wasm")]
+use wasm_bindgen::prelude::*;
+
+// ============================================================================
+// Resources & Structural Contexts
+// ============================================================================
+
+#[derive(Resource)]
+pub struct BevyTracksContext {
+    pub coroutine: Mutex<CoroutineManager>,
+    pub base_provider: Mutex<BaseProviderContext>,
+}
+
+#[derive(Resource, Default)]
+pub struct FrontendTime {
+    pub seconds: f32,
+}
+
+// Global thread-safe hook allowing JS commands to talk directly to our Bevy App instance
+static BEVY_APP_CHANNEL: Mutex<Option<App>> = Mutex::new(None);
+
+// ============================================================================
+// Components
+// ============================================================================
 
 #[derive(Component)]
 pub struct OrbitCamera {
@@ -15,26 +48,39 @@ pub struct OrbitCamera {
 #[derive(Component)]
 struct Rotating;
 
-/// Desktop/Native Entry Point
+// Markers containing pre-parsed tracking definitions
+#[derive(Component)]
+pub struct PositionTrack(pub Vector3PointDefinition);
+
+#[derive(Component)]
+pub struct RotationTrack(pub QuaternionPointDefinition);
+
+#[derive(Component)]
+pub struct ColorTrack(pub Vector4PointDefinition);
+
+#[derive(Component)]
+pub struct AnimationTrack {
+    pub target_entity: Entity,
+}
+
+// ============================================================================
+// App Entry Points
+// ============================================================================
+
 pub fn start_bevy() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_systems(Startup, setup)
-        .add_systems(
-            Update,
-            (
-                process_native_input_system,
-                update_camera_transform_system,
-                animate_cube_system,
-            ),
-        )
-        .run();
+    let app = App::new().add_plugins(DefaultPlugins);
+
+    configure_common_app(&mut app);
+
+    app.run();
 }
 
 /// WebAssembly Entry Point
 #[cfg(feature = "wasm")]
+#[pub_async_if_wasm] // Custom helper or manual async depending on toolchain
 pub async fn start_bevy_wasm(canvas_selector: &str) {
     let mut app = App::new();
+    configure_common_app(&mut app);
 
     // Configure Bevy to hook directly into your specific HTML5 Canvas element
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -47,17 +93,136 @@ pub async fn start_bevy_wasm(canvas_selector: &str) {
         ..default()
     }));
 
-    app.add_systems(Startup, setup)
+    // Cache the app instance globally so the javascript runtime can drive it
+    if let Ok(mut guard) = BEVY_APP_CHANNEL.lock() {
+        *guard = Some(app);
+    }
+}
+
+/// Registers the universal execution pipelines shared between native and browser runtimes
+fn configure_common_app(app: &mut App) {
+    // Instantiate core provider resources
+    app.insert_resource(FrontendTime::default())
+        .insert_resource(BevyTracksContext {
+            coroutine: Mutex::new(CoroutineManager::default()),
+            base_provider: Mutex::new(BaseProviderContext::default()),
+        })
+        .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 process_native_input_system,
                 update_camera_transform_system,
                 animate_cube_system,
+                process_position_animations_system,
+                process_rotation_animations_system,
             ),
-        )
-        .run();
+        );
+
+    // Dynamic Observer: Automatically adds 3D primitives whenever the frontend requests a cube
+    app.add_observer(
+        |trigger: Trigger<OnAdd, Name>,
+         mut commands: Commands,
+         mut meshes: ResMut<Assets<Mesh>>,
+         mut materials: ResMut<Assets<StandardMaterial>>| {
+            commands.entity(trigger.entity()).insert((
+                Mesh3d(meshes.add(Cuboid::from_size(Vec3::ONE))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.2, 0.6, 1.0),
+                    ..default()
+                })),
+            ));
+        },
+    );
 }
+
+// ============================================================================
+// Wasm-Bindgen Interface Boundaries (Frontend JS Commands)
+// ============================================================================
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn update_frontend_time(js_seconds: f32) {
+    if let Ok(mut guard) = BEVY_APP_CHANNEL.lock() {
+        if let Some(app) = guard.as_mut() {
+            if let Some(mut time_res) = app.world_mut().get_resource_mut::<FrontendTime>() {
+                time_res.seconds = js_seconds;
+            }
+            // Manually advance the engine update cycles alongside the frontend tick frame
+            app.update();
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn spawn_cube_from_frontend(id_str: String, x: f32, y: f32, z: f32) {
+    if let Ok(mut guard) = BEVY_APP_CHANNEL.lock() {
+        if let Some(app) = guard.as_mut() {
+            app.world_mut()
+                .spawn((Name::new(id_str), Transform::from_xyz(x, y, z)));
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+#[wasm_bindgen]
+pub fn add_json_animation_track(target_id: String, anim_type: String, json_data_str: String) {
+    let anim_type = AnimationTrackType::from_str(&anim_type).unwrap_or_else(|_| {
+        panic!("Invalid animation track type provided from frontend: {}", anim_type);
+    });
+
+    if let Ok(mut guard) = BEVY_APP_CHANNEL.lock() {
+        if let Some(app) = guard.as_mut() {
+            let world = app.world_mut();
+
+            let mut system_state =
+                bevy::ecs::system::SystemState::<Query<(Entity, &Name)>>::new(world);
+            let query = system_state.get(world);
+            let target_entity = query
+                .iter()
+                .find(|(_, name)| name.as_str() == target_id)
+                .map(|(entity, _)| entity);
+
+            if let Some(entity) = target_entity {
+                // Parse once immediately upon arrival
+                let parsed_json: serde_json::Value =
+                    serde_json::from_str(&json_data_str).unwrap_or_default();
+
+                let context = world.resource::<BevyTracksContext>();
+                let mut provider_ctx = context.base_provider.lock().unwrap();
+                let mut track_commands = world.spawn(AnimationTrack {
+                    target_entity: entity,
+                });
+
+                match anim_type {
+                    AnimationTrackType::Position => {
+                        let parsed_def =
+                            Vector3PointDefinition::parse(parsed_json, &mut provider_ctx);
+                        track_commands.insert(PositionTrack(parsed_def));
+                    }
+                    AnimationTrackType::Rotation => {
+                        let parsed_def =
+                            QuaternionPointDefinition::parse(parsed_json, &mut provider_ctx);
+                        track_commands.insert(RotationTrack(parsed_def));
+                    }
+                    AnimationTrackType::Color => {
+                        let parsed_def =
+                            Vector4PointDefinition::parse(parsed_json, &mut provider_ctx);
+                        track_commands.insert(ColorTrack(parsed_def));
+                    }
+                    _ => {
+                        error!("Unknown animation track type requested: {}", anim_type);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Pipeline Core Systems
+// ============================================================================
 
 fn setup(
     mut commands: Commands,
@@ -77,11 +242,7 @@ fn setup(
 
     // Cube
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::from_size(Vec3::ONE))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.8, 0.2, 0.2),
-            ..default()
-        })),
+        Name::new("sandbox_center_cube"),
         Transform::from_xyz(0.0, 0.5, 0.0),
         Rotating,
     ));
@@ -94,7 +255,7 @@ fn setup(
         Camera3d { ..default() },
         Transform::from_xyz(0.0, 2.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
         OrbitCamera {
-            target: Vec3::ZERO + Vec3::Y * 0.5, // Look slightly above the ground plane
+            target: Vec3::ZERO + Vec3::Y * 0.5,
             yaw: 0.0,
             pitch: -0.3,
             distance: 6.0,
@@ -199,5 +360,31 @@ fn animate_cube_system(time: Res<Time>, mut query: Query<&mut Transform, With<Ro
     for mut transform in query.iter_mut() {
         transform.rotation = Quat::from_rotation_y(time.elapsed_secs() * 0.8)
             * Quat::from_rotation_x(time.elapsed_secs() * 0.4);
+    }
+}
+
+fn process_position_animations_system(
+    frontend_time: Res<FrontendTime>,
+    tracks_query: Query<(&AnimationTrack, &PositionTrack)>,
+    mut targets_query: Query<&mut Transform>,
+) {
+    let current_time = frontend_time.seconds;
+    for (track, position_data) in tracks_query.iter() {
+        if let Ok(mut transform) = targets_query.get_mut(track.target_entity) {
+            transform.translation += position_data.0.evaluate(current_time);
+        }
+    }
+}
+
+fn process_rotation_animations_system(
+    frontend_time: Res<FrontendTime>,
+    tracks_query: Query<(&AnimationTrack, &RotationTrack)>,
+    mut targets_query: Query<&mut Transform>,
+) {
+    let current_time = frontend_time.seconds;
+    for (track, rotation_data) in tracks_query.iter() {
+        if let Ok(mut transform) = targets_query.get_mut(track.target_entity) {
+            transform.rotation = transform.rotation * rotation_data.0.evaluate(current_time);
+        }
     }
 }
