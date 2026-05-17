@@ -6,7 +6,7 @@
   "scripts": {
     "start": "vite",
     "dev": "vite",
-    "build": "vite build",
+    "build": "pnpm run build:wasm && vite build",
     "build:wasm": "node ./scripts/build_renderer.js",
     "serve": "vite preview",
     "tauri": "tauri"

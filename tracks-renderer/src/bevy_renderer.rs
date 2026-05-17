@@ -1,15 +1,8 @@
-use bevy::prelude::*;
-use bevy::prelude::shape;
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex, mpsc::Receiver};
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum InputCommand {
-    Key { key: String, pressed: bool },
-    MouseMove { dx: f32, dy: f32 },
-    MouseButton { button: String, pressed: bool },
-    Scroll { delta: f32 },
-}
+use bevy::{
+    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
+    prelude::*,
+};
+// Note: We no longer need serde or std::sync channels for input!
 
 #[derive(Component)]
 pub struct OrbitCamera {
@@ -22,28 +15,15 @@ pub struct OrbitCamera {
 #[derive(Component)]
 struct Rotating;
 
-#[derive(Default, Resource)]
-struct MouseState {
-    left: bool,
-    middle: bool,
-    right: bool,
-}
-
-#[derive(Resource)]
-struct SharedReceiver(Arc<Mutex<Receiver<InputCommand>>>);
-
-pub fn start_bevy(rx: Receiver<InputCommand>) {
-    let shared_rx = Arc::new(Mutex::new(rx));
-
+/// Desktop/Native Entry Point
+pub fn start_bevy() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .insert_resource(SharedReceiver(shared_rx))
-        .insert_resource(MouseState::default())
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
-                process_input_system,
+                process_native_input_system,
                 update_camera_transform_system,
                 animate_cube_system,
             ),
@@ -51,22 +31,27 @@ pub fn start_bevy(rx: Receiver<InputCommand>) {
         .run();
 }
 
-// Web/WASM startup: when compiled for wasm (with `wasm` feature), use this
-// function to start a Bevy app that renders to the web backend.
+/// WebAssembly Entry Point
 #[cfg(feature = "wasm")]
-pub async fn start_bevy_wasm(_canvas_id: &str) {
-    console_error_panic_hook::set_once();
-    use bevy::prelude::*;
+pub async fn start_bevy_wasm(canvas_selector: &str) {
+    let mut app = App::new();
 
-    // Build and run the Bevy app for web.
-    App::new()
-        .add_plugins(DefaultPlugins)
-        // .add_plugins(WebGL2Plugin)
-        .add_systems(Startup, setup)
+    // Configure Bevy to hook directly into your specific HTML5 Canvas element
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            canvas: Some(canvas_selector.to_string()),
+            // Optional: Prevents the browser window from scrolling when using the wheel over the canvas
+            prevent_default_event_handling: true,
+            ..default()
+        }),
+        ..default()
+    }));
+
+    app.add_systems(Startup, setup)
         .add_systems(
             Update,
             (
-                process_input_system,
+                process_native_input_system,
                 update_camera_transform_system,
                 animate_cube_system,
             ),
@@ -79,42 +64,35 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Ground
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(Mesh::from(shape::Plane { size: 50.0 })),
-        material: materials.add(StandardMaterial {
+    // Infinite Ground Plane
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(100000.0, 100000.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.12, 0.12, 0.12),
+            perceptual_roughness: 1.0,
             ..default()
-        }),
-        ..default()
-    });
+        })),
+        Transform::IDENTITY,
+    ));
 
     // Cube
     commands.spawn((
-        PbrBundle {
-            mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
-            material: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.8, 0.2, 0.2),
-                ..default()
-            }),
-            transform: Transform::from_xyz(0.0, 0.5, 0.0),
+        Mesh3d(meshes.add(Cuboid::from_size(Vec3::ONE))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.8, 0.2, 0.2),
             ..default()
-        },
+        })),
+        Transform::from_xyz(0.0, 0.5, 0.0),
         Rotating,
     ));
 
     // Light
-    commands.spawn(PointLightBundle {
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
-        ..default()
-    });
+    commands.spawn((PointLight::default(), Transform::from_xyz(4.0, 8.0, 4.0)));
 
-    // Camera with orbit component
+    // Camera with an extended Far Clipping Plane for infinite grounds
     commands.spawn((
-        Camera3dBundle {
-            transform: Transform::from_xyz(0.0, 2.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
-            ..default()
-        },
+        Camera3d { ..default() },
+        Transform::from_xyz(0.0, 2.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
         OrbitCamera {
             target: Vec3::ZERO,
             yaw: 0.0,
@@ -124,51 +102,85 @@ fn setup(
     ));
 }
 
-fn process_input_system(
-    rx: Res<SharedReceiver>,
-    mut mouse: ResMut<MouseState>,
-    mut cam_query: Query<(&mut Transform, &mut OrbitCamera), With<Camera3d>>,
+/// **Native Input System**: Leverages Bevy's built-in accumulated mouse resources
+/// for clean, aggregate, frame-rate independent viewing adjustments.
+fn process_native_input_system(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>, // Built-in keyboard manager
+    mouse_buttons: Res<ButtonInput<MouseButton>>, // Built-in mouse button manager
+    mouse_motion: Res<AccumulatedMouseMotion>, // NEW: Automatically accumulates continuous frame motion
+    mouse_scroll: Res<AccumulatedMouseScroll>, // NEW: Automatically accumulates continuous scroll updates
+    mut cam_query: Query<&mut OrbitCamera, With<Camera3d>>,
 ) {
-    while let Ok(cmd) = rx.0.lock().unwrap().try_recv() {
-        match cmd {
-            InputCommand::Key { .. } => {
-                // reserved for future use
+    // 1. Blender Style: Handle Right-Click dragging to rotate view matrix orientation
+    if mouse_buttons.pressed(MouseButton::Right) {
+        // Grab the pre-accumulated delta directly from the resource (no manual loop required)
+        let delta = mouse_motion.delta;
+
+        if delta.x != 0.0 || delta.y != 0.0 {
+            for mut orbit in cam_query.iter_mut() {
+                orbit.yaw -= delta.x * 0.005;
+                orbit.pitch -= delta.y * 0.005;
+                orbit.pitch = orbit.pitch.clamp(-1.4, 1.4);
             }
-            InputCommand::MouseButton { button, pressed } => match button.as_str() {
-                "Left" => mouse.left = pressed,
-                "Middle" => mouse.middle = pressed,
-                "Right" => mouse.right = pressed,
-                _ => {}
-            },
-            InputCommand::MouseMove { dx, dy } => {
-                for (_transform, mut orbit) in cam_query.iter_mut() {
-                    if mouse.right {
-                        orbit.yaw -= dx * 0.01;
-                        orbit.pitch += dy * 0.01;
-                        orbit.pitch = orbit.pitch.clamp(-1.5, 1.5);
-                    }
-                    if mouse.middle {
-                        let right = Vec3::new(orbit.yaw.cos(), 0.0, orbit.yaw.sin());
-                        orbit.target += -right * dx * 0.05 + Vec3::Y * (-dy * 0.05);
-                    }
-                }
-            }
-            InputCommand::Scroll { delta } => {
-                for (_transform, mut orbit) in cam_query.iter_mut() {
-                    orbit.distance = (orbit.distance - delta * 0.2).clamp(0.5, 100.0);
-                }
-            }
+        }
+    }
+
+    // 2. Proportional Zoom: Handle Scroll Wheel input updates
+    // Grab the pre-accumulated continuous wheel tracking variable
+    let scroll_delta = mouse_scroll.delta.y;
+
+    if scroll_delta != 0.0 {
+        for mut orbit in cam_query.iter_mut() {
+            let zoom_factor = (orbit.distance * 0.1).max(0.2);
+            orbit.distance = (orbit.distance - scroll_delta * zoom_factor).clamp(1.5, 100.0);
+        }
+    }
+
+    // 3. Spectator Panning: Process real-time keyboard inputs
+    for mut orbit in cam_query.iter_mut() {
+        let move_speed = 6.0 * time.delta_secs();
+
+        let forward = Vec3::new(orbit.yaw.sin(), 0.0, orbit.yaw.cos()).normalize_or_zero();
+        let right = Vec3::new(orbit.yaw.cos(), 0.0, -orbit.yaw.sin()).normalize_or_zero();
+
+        if keys.pressed(KeyCode::KeyW) {
+            orbit.target -= forward * move_speed;
+        }
+        if keys.pressed(KeyCode::KeyS) {
+            orbit.target += forward * move_speed;
+        }
+        if keys.pressed(KeyCode::KeyA) {
+            orbit.target -= right * move_speed;
+        }
+        if keys.pressed(KeyCode::KeyD) {
+            orbit.target += right * move_speed;
+        }
+        if keys.pressed(KeyCode::Space) {
+            orbit.target += Vec3::Y * move_speed;
+        }
+        // rotate right
+        if keys.pressed(KeyCode::KeyQ) {
+            orbit.yaw -= move_speed * 0.5;
+        }
+        if keys.pressed(KeyCode::KeyE) {
+            orbit.yaw += move_speed * 0.5;
         }
     }
 }
 
-fn update_camera_transform_system(mut query: Query<(&mut Transform, &OrbitCamera), With<Camera3d>>) {
+fn update_camera_transform_system(
+    mut query: Query<(&mut Transform, &OrbitCamera), With<Camera3d>>,
+) {
     for (mut transform, orbit) in query.iter_mut() {
         let x = orbit.distance * orbit.pitch.cos() * orbit.yaw.sin();
         let y = orbit.distance * orbit.pitch.sin();
         let z = orbit.distance * orbit.pitch.cos() * orbit.yaw.cos();
-        let pos = Vec3::new(x, y, z) + orbit.target;
-        *transform = Transform::from_translation(pos).looking_at(orbit.target, Vec3::Y);
+
+        let camera_pos = Vec3::new(x, y, z) + orbit.target;
+
+        transform.translation = camera_pos;
+        transform.look_at(orbit.target, Vec3::Y);
     }
 }
 

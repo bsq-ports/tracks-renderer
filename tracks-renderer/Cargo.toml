@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 bevy = {version = "0.18.1", features = ["3d", "webgl2", "std"], default-features = false }
-wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen = { version = "0.2.121", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", optional = true, features = ["Window", "console"] }
