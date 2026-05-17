@@ -94,7 +94,7 @@ fn setup(
         Camera3d { ..default() },
         Transform::from_xyz(0.0, 2.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
         OrbitCamera {
-            target: Vec3::ZERO,
+            target: Vec3::ZERO + Vec3::Y * 0.5, // Look slightly above the ground plane
             yaw: 0.0,
             pitch: -0.3,
             distance: 6.0,
@@ -166,6 +166,9 @@ fn process_native_input_system(
         }
         if keys.pressed(KeyCode::Space) {
             orbit.target += Vec3::Y * move_speed;
+        }
+        if keys.pressed(KeyCode::ShiftLeft) {
+            orbit.target -= Vec3::Y * move_speed;
         }
         // rotate right
         if keys.pressed(KeyCode::KeyQ) {
