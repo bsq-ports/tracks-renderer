@@ -131,9 +131,17 @@ fn process_native_input_system(
     let scroll_delta = mouse_scroll.delta.y;
 
     if scroll_delta != 0.0 {
+        // 1. Apply a dampening multiplier (e.g., 0.05) to bring browser pixel deltas
+        // into a manageable range, while keeping desktop line scrolling functional.
+        let structural_delta = scroll_delta * 0.05;
+
         for mut orbit in cam_query.iter_mut() {
-            let zoom_factor = (orbit.distance * 0.1).max(0.2);
-            orbit.distance = (orbit.distance - scroll_delta * zoom_factor).clamp(1.5, 100.0);
+            // 2. Scale the zoom factor exponentially based on current distance.
+            // This ensures zooming is granular when close up, and swift when far away.
+            let zoom_factor = orbit.distance * 0.1;
+
+            // 3. Compute and clamp the target distance safely
+            orbit.distance = (orbit.distance - structural_delta * zoom_factor).clamp(1.5, 100.0);
         }
     }
 

@@ -6,9 +6,9 @@ import { join } from 'path';
 const root = process.cwd();
 const outDir = join(root, 'src', 'bevy_wasm_pkg');
 
-function run(cmd) {
+function run(cmd, cwd = root) {
   console.log('$', cmd);
-  execSync(cmd, { stdio: 'inherit', cwd: './tracks-renderer' });
+  execSync(cmd, { stdio: 'inherit', cwd: cwd });
 }
 
 try {
